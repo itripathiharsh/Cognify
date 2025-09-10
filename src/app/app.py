@@ -1,3 +1,5 @@
+# src/app/app.py
+
 import streamlit as st
 import cv2
 import numpy as np
@@ -12,50 +14,57 @@ from fpdf import FPDF
 import base64
 import json
 
-# Firebase Imports 
+# --- Firebase Imports ---
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 
-# Add project root to PYTHONPATH 
+# --- Add project root to PYTHONPATH ---
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Import Modules
+# --- Import Modules ---
 from src.uncertainty.uncertainty_infer import UncertaintyInference
 from src.fatigue.fatigue_calculator import FatigueCalculator
 from src.product.scorer import calculate_scores
 
-# Page Config
+# --- Page Config ---
 st.set_page_config(page_title="Real-time Productivity Dashboard", page_icon="🧠", layout="wide")
 
-
-# FIREBASE INITIALIZATION 
+# ==============================================================================
+# --- FIREBASE INITIALIZATION ---
+# ==============================================================================
 
 def init_firebase():
-    """Initialize Firebase Admin SDK"""
+    """Initialize Firebase Admin SDK using Streamlit secrets"""
     try:
         firebase_admin.get_app()
     except ValueError:
         try:
-            cred = credentials.Certificate("firebase-service-account.json")
-            with open("firebase-service-account.json", 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                project_id = config.get("project_id", "emotion-productivity")
+            # Use Streamlit secrets instead of local file
+            if 'firebase' in st.secrets:
+                cred_dict = dict(st.secrets["firebase"])
+                cred = credentials.Certificate(cred_dict)
+                
+                # Get project ID from secrets
+                project_id = cred_dict.get("project_id", "emotion-productivity")
                 bucket_name = f"{project_id}.appspot.com"
-            
-            firebase_admin.initialize_app(cred, {
-                'storageBucket': bucket_name
-            })
-            print(f"✅ Firebase initialized with project: {project_id}")
+                
+                firebase_admin.initialize_app(cred, {
+                    'storageBucket': bucket_name
+                })
+                print(f"✅ Firebase initialized with project: {project_id}")
+            else:
+                st.error("❌ Firebase credentials not found in Streamlit secrets!")
+                st.stop()
         except Exception as e:
             st.error(f"❌ Firebase init failed: {e}")
             st.stop()
     return firestore.client()
 
-
-# MODEL & STATE INITIALIZATION
-
+# ==============================================================================
+# --- MODEL & STATE INITIALIZATION ---
+# ==============================================================================
 
 @st.cache_resource
 def load_models():
@@ -121,8 +130,9 @@ for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-
-# FEATURE ENGINEERING 
+# ==============================================================================
+# --- FEATURE ENGINEERING ---
+# ==============================================================================
 
 def engineer_realtime_features(data_buffer: deque, feature_names: list):
     """Engineers features for ML model from buffer."""
@@ -152,7 +162,9 @@ def engineer_realtime_features(data_buffer: deque, feature_names: list):
     
     return feature_df[feature_names]
 
-# LOGIN PAGE
+# ==============================================================================
+# --- LOGIN PAGE ---
+# ==============================================================================
 
 def render_login_page():
     st.title("🔐 Login to Productivity Dashboard")
@@ -196,7 +208,9 @@ def render_login_page():
             except Exception as e:
                 st.error(f"❌ Signup failed: {str(e)}")
 
-# DASHBOARD PAGES
+# ==============================================================================
+# --- DASHBOARD PAGES ---
+# ==============================================================================
 
 def render_dashboard_page():
     st.title("🧠 Real-time Productivity Dashboard")
@@ -383,7 +397,7 @@ def render_dashboard_page():
                     arousal_placeholder.metric("⚡ Arousal (Energy)", f"{final_scores['arousal']:.2f}")
                     productivity_placeholder.metric("📊 Productivity Score", f"{display_productivity}/5.0")
 
-                    # REAL-TIME ALERTS
+                    # --- REAL-TIME ALERTS ---
                     try:
                         if fatigue_index > 0.7 and not st.session_state.get('fatigue_alert_shown', False):
                             st.toast("⚠️ Fatigue High — Take a Break!", icon="⚠️")
@@ -399,7 +413,7 @@ def render_dashboard_page():
                     except:
                         pass  # Ignore if Streamlit connection is lost
 
-                    # RECORD FOCUS DATA
+                    # --- RECORD FOCUS DATA ---
                     if st.session_state.get('focus_session_active', False):
                         elapsed_focus = time.time() - st.session_state.focus_session_start
                         if elapsed_focus <= 25*60:
@@ -425,8 +439,9 @@ def render_dashboard_page():
             st.session_state.webcam_running = False
             st.info("⏹️ Webcam stopped. Click 'Start Webcam' to resume.")
 
-
-# SESSION SUMMARY PAGE
+# ==============================================================================
+# --- SESSION SUMMARY PAGE ---
+# ==============================================================================
 
 def render_session_summary_page():
     st.title("📊 Session Summary Report")
@@ -440,7 +455,7 @@ def render_session_summary_page():
     df['Hour'] = df['Time'].dt.hour
     df['Day'] = df['Time'].dt.day_name()
 
-    # Key Metrics 
+    # --- Key Metrics ---
     col1, col2, col3 = st.columns(3)
     with col1:
         avg_prod = df['Productivity Score'].mean()
@@ -452,19 +467,19 @@ def render_session_summary_page():
         avg_fatigue = df['Fatigue Index'].mean()
         st.metric("Average Fatigue", f"{avg_fatigue:.2f}")
 
-    # Charts
+    # --- Charts ---
     st.header("📈 Productivity & Fatigue Over Time")
     st.line_chart(df.set_index('Time')[['Productivity Score', 'Fatigue Index']], 
                   color=["#2E8B57", "#FFA500"])
 
-    # Peak/Low Periods
+    # --- Peak/Low Periods ---
     st.header("⏱️ Peak & Low Performance Periods")
     peak_time = df.loc[df['Productivity Score'].idxmax(), 'Time']
     low_time = df.loc[df['Productivity Score'].idxmin(), 'Time']
     st.write(f"✅ **Peak Productivity**: {peak_time.strftime('%H:%M:%S')} ({peak_prod:.2f}/5.0)")
     st.write(f"⚠️ **Low Productivity**: {low_time.strftime('%H:%M:%S')} ({df['Productivity Score'].min():.2f}/5.0)")
 
-    # Recommendations
+    # --- Recommendations ---
     st.header("💡 Recommendations")
     if avg_fatigue > 0.5:
         st.warning("🛌 You showed high fatigue. Try shorter sessions with breaks.")
@@ -473,7 +488,7 @@ def render_session_summary_page():
     if peak_prod > 4.0:
         st.success("🚀 You hit high focus! Schedule important tasks during similar times.")
 
-    # Export PDF
+    # --- Export PDF ---
     st.header("📥 Export Report")
     if st.button("📄 Generate PDF Report"):
         pdf = FPDF()
@@ -495,7 +510,7 @@ def render_session_summary_page():
             href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pdf_output}">Download PDF Report</a>'
             st.markdown(href, unsafe_allow_html=True)
 
-    # SAVE TO FIRESTORE
+    # --- SAVE TO FIRESTORE ---
     st.header("☁️ Save to Cloud")
     if st.button("💾 Save Session to Firebase"):
         if 'user' not in st.session_state:
@@ -519,9 +534,9 @@ def render_session_summary_page():
         except Exception as e:
             st.error(f"❌ Save failed: {e}")
 
-
-# LONG-TERM TRENDS PAGE
-
+# ==============================================================================
+# --- LONG-TERM TRENDS PAGE ---
+# ==============================================================================
 
 def render_long_term_trends_page():
     st.title("📈 Long-Term Trends & Insights")
@@ -554,7 +569,7 @@ def render_long_term_trends_page():
         df['DayOfWeek'] = df['Time'].dt.day_name()
         df['Date'] = pd.to_datetime(df['SessionDate'])
 
-        # Daily Patterns
+        # --- Daily Patterns ---
         st.header("⏰ Productivity by Hour of Day")
         hourly_avg = df.groupby('Hour')['Productivity Score'].mean()
         st.line_chart(hourly_avg)
@@ -562,7 +577,7 @@ def render_long_term_trends_page():
         peak_hour = hourly_avg.idxmax()
         st.write(f"✅ **Your Peak Productivity Hour**: {peak_hour}:00")
 
-        # Weekly Patterns
+        # --- Weekly Patterns ---
         st.header("📅 Productivity by Day of Week")
         day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
         daily_avg = df.groupby('DayOfWeek')['Productivity Score'].mean().reindex(day_order)
@@ -572,7 +587,7 @@ def render_long_term_trends_page():
         worst_day = daily_avg.idxmin()
         st.write(f"🌟 **Best Day**: {best_day} | 📉 **Worst Day**: {worst_day}")
 
-        # Fatigue Trends
+        # --- Fatigue Trends ---
         st.header("📊 Fatigue Patterns")
         afternoon_fatigue = df[df['Hour'] >= 16]['Fatigue Index'].mean()
         morning_fatigue = df[df['Hour'] < 12]['Fatigue Index'].mean()
@@ -580,7 +595,7 @@ def render_long_term_trends_page():
             if afternoon_fatigue > morning_fatigue * 1.5:
                 st.warning(f"⚠️ After 4 PM, your fatigue is {afternoon_fatigue/morning_fatigue:.1f}x higher than morning!")
 
-        # Smart Insights
+        # --- Smart Insights ---
         st.header("💡 Smart Insights")
         if peak_hour < 12:
             st.info("🌞 You're a morning person! Schedule deep work before noon.")
@@ -594,9 +609,9 @@ def render_long_term_trends_page():
     except Exception as e:
         st.error(f"❌ Could not load trends: {e}")
 
-
-# MAIN ROUTER
-
+# ==============================================================================
+# --- MAIN ROUTER ---
+# ==============================================================================
 
 st.sidebar.title("🧭 Navigation")
 
