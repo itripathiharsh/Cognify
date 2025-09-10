@@ -1,0 +1,3 @@
+user_id,session_id,task_id,wpm,accuracy,task_perf_score,self_prod_1_5,self_fatigue_1_5,self_stress_1_5
+user_01,session_01,typing_test,0.0,0.0,0.0,2,4,2
+user_01,session_01,typing_test,32.93001178600819,1.0,32.93001178600819,3,3,3
