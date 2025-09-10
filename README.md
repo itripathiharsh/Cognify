@@ -1,12 +1,9 @@
----
-
 # 🧠 Cognify – AI Productivity & Wellness Dashboard
 
 **Real-time AI dashboard that tracks your emotions, detects fatigue, and visualizes productivity patterns.** 🚀
 
 > *"Understanding your mind is the first step to optimizing your potential."*
 
----
 
 ## 🌟 Overview
 
@@ -199,14 +196,3 @@ Licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-## ⭐ Show Support
-
-If you like this project, **give it a star** ⭐ and share it!
-
-[![GitHub stars](https://img.shields.io/github/stars/itripathiharsh/Cognify?style=social)](https://github.com/itripathiharsh/Cognify/stargazers)
-
----
-
-✅ This version is **descriptive, professional, and research-grade** — easy to present on GitHub, in a hackathon, or even for a research paper.
-
-Do you want me to also prepare a **short academic abstract (150–200 words)** that you can use in reports/papers describing this project?
