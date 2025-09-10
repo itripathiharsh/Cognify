@@ -5,9 +5,11 @@ numpy==1.26.4
 scipy==1.13.1
 pandas==2.2.2
 scikit-learn==1.5.1
-opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 mediapipe==0.10.14
 streamlit==1.38.0
 firebase-admin==6.5.0
 fpdf==1.7.2
 protobuf==4.25.3
+libgl1
+libglib2.0-0
