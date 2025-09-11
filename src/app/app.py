@@ -1,4 +1,8 @@
+# src/app/app.py
+
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoTransformerBase
+import av
 import cv2
 import numpy as np
 import sys
@@ -11,24 +15,26 @@ from collections import deque
 from fpdf import FPDF
 import base64
 import json
-import av
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
-#Firebase Imports
+# --- Firebase Imports ---
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 
-# Add project root to PYTHONPATH
+# --- Add project root to PYTHONPATH ---
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# --- Page Config ---
+st.set_page_config(page_title="DriverEye - Fatigue Detection", page_icon="🚗", layout="wide")
 
-# Page Config
-st.set_page_config(page_title="Real-time Productivity Dashboard", page_icon="🧠", layout="wide")
+# --- Always mark as calibrated for deployment ---
+if "is_calibrated" not in st.session_state:
+    st.session_state.is_calibrated = True
 
-# FIREBASE INITIALIZATION
+st.title("🚗 DriverEye - Real-Time Fatigue Detection")
 
+# --- FIREBASE INITIALIZATION ---
 def init_firebase():
     """Initialize Firebase Admin SDK using Streamlit secrets"""
     try:
@@ -38,10 +44,8 @@ def init_firebase():
             if 'firebase' in st.secrets:
                 cred_dict = dict(st.secrets["firebase"])
                 cred = credentials.Certificate(cred_dict)
-
                 project_id = cred_dict.get("project_id", "emotion-productivity")
                 bucket_name = f"{project_id}.appspot.com"
-
                 firebase_admin.initialize_app(cred, {
                     'storageBucket': bucket_name
                 })
@@ -55,35 +59,31 @@ def init_firebase():
             st.stop()
     return firestore.client()
 
-
-# MODEL LOADING (For use inside VideoTransformer)
-
-def load_models_for_transformer():
-    """Loads models specifically for the VideoTransformer."""
+# --- MODEL LOADING (For use inside VideoTransformer) ---
+def load_fatigue_model_for_transformer():
+    """Loads the FatigueCalculator model specifically for the VideoTransformer."""
     try:
-        from src.uncertainty.uncertainty_infer import UncertaintyInference
         from src.fatigue.fatigue_calculator import FatigueCalculator
-        from src.product.scorer import calculate_scores
-
-        emotion_model = UncertaintyInference()
         fatigue_model = FatigueCalculator()
-        print("✅ Models loaded for VideoTransformer")
-        return emotion_model, fatigue_model, calculate_scores
+        print("✅ Fatigue model loaded for VideoTransformer")
+        return fatigue_model
     except Exception as e:
-        print(f"❌ Failed to load models for VideoTransformer: {e}")
-        return None, None, None
+        print(f"❌ Failed to load Fatigue model for VideoTransformer: {e}")
+        return None
 
-#WEBCAM PROCESSING WITH WEBRTC
-
-class EmotionFatigueVideoTransformer(VideoTransformerBase):
+# --- WEBCAM PROCESSING WITH WEBRTC ---
+# --- Define the Video Processing Logic ---
+class FatigueVideoTransformer(VideoTransformerBase):
     def __init__(self) -> None:
-        self.emotion_model, self.fatigue_model, self.calculate_scores = load_models_for_transformer()
-        if self.emotion_model is None or self.fatigue_model is None:
+        self.fatigue_model = load_fatigue_model_for_transformer()
+        if self.fatigue_model is None:
             self.disabled = True
             print("❌ VideoTransformer disabled due to model loading failure.")
         else:
             self.disabled = False
-            print("✅ VideoTransformer initialized.")
+            # Internal buffer to store recent processing results for data passing
+            self.data_log = deque(maxlen=200) # Store last 200 data points (~10 secs at 20 fps)
+            print("✅ Fatigue VideoTransformer initialized.")
 
     def transform(self, frame: av.VideoFrame) -> av.VideoFrame:
         if self.disabled:
@@ -92,58 +92,100 @@ class EmotionFatigueVideoTransformer(VideoTransformerBase):
         img_bgr = frame.to_ndarray(format="bgr24")
 
         try:
-            # PROCESSING LOGIC
-            # 1. Fatigue Analysis
+            # --- PROCESSING LOGIC ---
             fatigue_data = self.fatigue_model.update_metrics(img_bgr)
             fatigue_index = self.fatigue_model.get_fatigue_index()
 
-            # 2. Emotion Analysis
-            emotion_data = self.emotion_model.predict_with_uncertainty(img_bgr)
+            # --- Simulate Productivity Score ---
+            # In a full implementation, you would integrate emotion and scorer models here.
+            # For demonstration, we'll derive a simple proxy from fatigue.
+            # A more complex score could be: display_productivity = calculate_scores(emotion_data, fatigue_index)
+            # Ensure it maps to your desired range, e.g., [1, 5]
+            display_productivity = max(1.0, 5.0 - (fatigue_index * 4)) # Simple inverse relationship
 
-            # 3. Productivity Scoring (if emotion detected)
-            display_productivity = "N/A"
-            if emotion_data:
-                final_scores = self.calculate_scores(emotion_data, fatigue_index)
-                rule_prod = final_scores['productivity']
-                display_productivity = round((rule_prod + 1) * 2 + 1, 2)
-                display_productivity = np.clip(display_productivity, 1.0, 5.0)
+            # --- Log data for passing back to main app ---
+            # Store relevant metrics with a timestamp
+            data_point = {
+                'timestamp': time.time(),
+                'fatigue_index': fatigue_index,
+                'productivity_score': display_productivity,
+                'ear': fatigue_data.get('ear', 0),
+                'mar': fatigue_data.get('mar', 0),
+                # Add valence, arousal, emotion confidence if available from full processing
+                'valence': 0.5 - fatigue_index, # Placeholder
+                'arousal': 0.5 + fatigue_index,  # Placeholder
+                'emotion_confidence': 0.8 # Placeholder
+            }
+            self.data_log.append(data_point)
 
-            # Overlay information on the frame
-            cv2.putText(img_bgr, f"Fatigue: {fatigue_index:.2f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if fatigue_index < 0.5 else (0, 165, 255) if fatigue_index < 0.7 else (0, 0, 255), 2)
-            cv2.putText(img_bgr, f"Productivity: {display_productivity}", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            # Add emotion if detected
-            if emotion_data:
-                cv2.putText(img_bgr, f"Emotion: {emotion_data['top1']} ({emotion_data['confidence']:.2f})", (10, 90),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # --- Overlay information on the frame ---
+            color = (0, 255, 0) # Green
+            if fatigue_index >= 0.7:
+                color = (0, 0, 255) # Red
+            elif fatigue_index >= 0.5:
+                color = (0, 165, 255) # Orange
+
+            cv2.putText(
+                img_bgr,
+                f"Fatigue Index: {fatigue_index:.2f}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2
+            )
+            cv2.putText(
+                img_bgr,
+                f"Productivity: {display_productivity:.2f}",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
+            )
+            # Optionally, display EAR and MAR values.
+            cv2.putText(
+                img_bgr,
+                f"EAR: {fatigue_data['ear']:.2f}, MAR: {fatigue_data['mar']:.2f}",
+                (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1
+            )
 
         except Exception as e:
             print(f"Error processing frame in transformer: {e}")
-            cv2.putText(img_bgr, "Processing Error", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(
+                img_bgr,
+                "Processing Error",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            )
+
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
-# MODEL & STATE INITIALIZATION (For main app logic)
-
+# --- MODEL & STATE INITIALIZATION (For main app logic) ---
 @st.cache_resource
 def load_models_for_main_app():
-    """Loads models for main app logic (e.g., personalized model if exists locally)."""
+    """Placeholder for loading main app models if needed (e.g., personalized)."""
     try:
-        from src.uncertainty.uncertainty_infer import UncertaintyInference
-        from src.fatigue.fatigue_calculator import FatigueCalculator 
-        from src.product.scorer import calculate_scores 
-
-        emotion_model = UncertaintyInference()
-        try:
-            prod_model = joblib.load("models/productivity_model.joblib")
-            st.sidebar.success("✅ Productivity prediction model loaded")
-        except FileNotFoundError:
-            prod_model = None
-            st.sidebar.warning("⚠️ Productivity model not found. Using rule-based scoring.")
-
-        voice_analyzer = None
+        # If you have models that run outside the transformer (e.g., post-session analysis)
+        # from src.uncertainty.uncertainty_infer import UncertaintyInference
+        # emotion_model = UncertaintyInference()
+        prod_model = None
         personalized_model = None
+
+        # Example loading a productivity model if it exists
+        # try:
+        #     prod_model = joblib.load("models/productivity_model.joblib")
+        #     st.sidebar.success("✅ Productivity prediction model loaded")
+        # except FileNotFoundError:
+        #     prod_model = None
+        #     st.sidebar.warning("⚠️ Productivity model not found.")
 
         if 'user' in st.session_state:
             local_path = f"models/user_{st.session_state.user['uid']}_productivity_model.joblib"
@@ -154,78 +196,40 @@ def load_models_for_main_app():
                 except Exception as e:
                     print(f"⚠️ Could not load local personalized model: {e}")
 
-        return emotion_model, prod_model, voice_analyzer, personalized_model
+        # return emotion_model, prod_model, personalized_model
+        return None, prod_model, personalized_model # Return None for emotion_model if not used here
     except Exception as e:
         st.error(f"Failed to load models for main app: {e}")
-        return None, None, None, None
+        return None, None, None
 
 # Initialize Firebase
 if 'db' not in st.session_state:
     st.session_state.db = init_firebase()
 
-# Load models for main app logic (personalized model, etc.)
-emotion_model_main, prod_model, voice_analyzer, personalized_model = load_models_for_main_app()
+# Load models for main app logic (if any)
+# emotion_model_main, prod_model, personalized_model = load_models_for_main_app()
+_, prod_model, personalized_model = load_models_for_main_app()
 
-if emotion_model_main is None:
-    st.error("Application cannot start - main model loading failed.")
-    st.stop()
-
-# Initialize session state (mostly for non-webcam parts like focus session, login, history)
+# Initialize session state for non-video parts
 defaults = {
     'page': "Login",
-    'is_calibrated': False, 
-    'webcam_running': False, 
-    'data_buffer': deque(maxlen=300),
-    'history_buffer': pd.DataFrame(columns=['Time', 'Valence', 'Arousal', 'Fatigue Index', 'Productivity Score']),
-    'last_pred_time': 0,
-    'prod_model_features': prod_model.feature_names_in_ if prod_model else [],
-    'fatigue_alert_shown': False,
-    'focus_alert_shown': False,
+    'is_calibrated': True, # Always calibrated for WebRTC
+    'webcam_running': False, # Not directly used with webrtc_streamer anymore
+    'data_buffer': deque(maxlen=300), # For storing session data points
+    'history_buffer': pd.DataFrame(columns=['Time', 'Valence', 'Arousal', 'Fatigue Index', 'Productivity Score']), # For session/chart data
     'focus_session_active': False,
     'focus_session_start': 0,
-    'focus_data': [],
     'focus_session_score': 0.0,
-    'voice_monitoring': False,
+    'user': None # Will be set after login
 }
 
 for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-# FEATURE ENGINEERING (For main app logic if needed)
-
-def engineer_realtime_features(data_buffer: deque, feature_names: list):
-    """Engineers features for ML model from buffer."""
-    if len(data_buffer) < 20:
-        return None
-
-    df = pd.DataFrame(list(data_buffer))
-    features = {}
-
-    metrics_to_agg = ['confidence', 'entropy', 'valence', 'arousal', 'EAR', 'MAR', 'FI']
-    for col in metrics_to_agg:
-        if col in df.columns:
-            features[f'{col}_mean'] = df[col].mean()
-            features[f'{col}_std'] = df[col].std()
-            features[f'{col}_volatility'] = df[col].diff().std()
-
-    if 'top1' in df.columns:
-        emotion_histogram = df['top1'].value_counts(normalize=True).to_dict()
-        for emotion in ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']:
-            features[f'emotion_hist_{emotion}'] = emotion_histogram.get(emotion, 0.0)
-
-    feature_df = pd.DataFrame([features])
-
-    for col in feature_names:
-        if col not in feature_df.columns:
-            feature_df[col] = 0.0
-
-    return feature_df[feature_names]
-
-# LOGIN PAGE
-
+# --- LOGIN PAGE ---
 def render_login_page():
-    st.title("🔐 Login to Productivity Dashboard")
+    st.title("🔐 Login to DriverEye Dashboard")
 
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
@@ -234,6 +238,8 @@ def render_login_page():
         password = st.text_input("Password", type="password", key="login_password")
         if st.button("Login", type="primary"):
             try:
+                # Note: Firebase Admin SDK doesn't handle user passwords directly for login.
+                # This is a simplified check. For real auth, use Firebase Client SDK or custom tokens.
                 user = auth.get_user_by_email(email)
                 st.session_state.user = {
                     'uid': user.uid,
@@ -247,13 +253,14 @@ def render_login_page():
 
     with tab2:
         email = st.text_input("Email", key="signup_email")
-        password = st.text_input("Password", type="password", key="signup_password")
+        password = st.text_input("Password", type="password", key="signup_password") # Not used by Admin SDK
         name = st.text_input("Display Name", key="signup_name")
         if st.button("Sign Up", type="primary"):
             try:
+                # Requires enabling Email/Password provider in Firebase Console
                 user = auth.create_user(
                     email=email,
-                    password=password,
+                    password=password, # This might not work as expected with Admin SDK alone
                     display_name=name
                 )
                 st.session_state.user = {
@@ -266,13 +273,9 @@ def render_login_page():
             except Exception as e:
                 st.error(f"❌ Signup failed: {str(e)}")
 
-#  DASHBOARD PAGES
-
+# --- DASHBOARD PAGE ---
 def render_dashboard_page():
-    st.title("🧠 Real-time Productivity Dashboard")
-
-    # Calibration Note (WebRTC approach)
-    st.info("ℹ️ Webcam access is handled directly by your browser. Ensure you allow camera permissions. Baseline metrics are established automatically.")
+    st.info("ℹ️ Webcam access is handled directly by your browser. Ensure you allow camera permissions.")
 
     # Layout
     col1, col2 = st.columns([2, 1])
@@ -280,29 +283,27 @@ def render_dashboard_page():
     with col1:
         st.header("📹 Live Camera Feed")
 
-        # WEBCAM STREAM WITH WEBRTC
+        # --- WEBCAM STREAM WITH WEBRTC ---
         webrtc_ctx = webrtc_streamer(
-            key="emotion-fatigue-analysis", 
-            mode=WebRtcMode.SENDRECV,     
-            video_processor_factory=EmotionFatigueVideoTransformer,
-            media_stream_constraints={"video": True, "audio": False}, 
-            async_processing=True,          
+            key="driver-eye-fatigue-analysis",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=FatigueVideoTransformer,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
         )
 
-     
         if webrtc_ctx.state.playing:
-            st.write("✅ Webcam stream is active.")
+            st.success("✅ Webcam stream is active.")
         else:
-            st.write("⏸️ Webcam stream is inactive. Click 'Start' above.")
+            st.info("⏸️ Webcam stream is inactive. Click 'Start' above.")
 
-        # FOCUS SESSION CONTROLS (keep existing logic)
+        # --- FOCUS SESSION CONTROLS ---
         st.markdown("### 🍅 Focus Session")
         col_pomo_start, col_pomo_status = st.columns(2)
         with col_pomo_start:
             if st.button("Start 25-min Focus Session", key="pomo_start"):
                 st.session_state.focus_session_start = time.time()
                 st.session_state.focus_session_active = True
-                st.session_state.focus_data = [] 
                 st.success("🍅 Focus session started!")
 
         with col_pomo_status:
@@ -310,16 +311,13 @@ def render_dashboard_page():
                 elapsed = time.time() - st.session_state.focus_session_start
                 if elapsed > 25*60:
                     st.session_state.focus_session_active = False
-                    if len(st.session_state.focus_data) > 0:
-                        st.session_state.focus_session_score = np.random.uniform(60, 95) # Dummy value
-                        try:
-                            st.toast(f"🎉 Session Complete! Estimated focus: {st.session_state.focus_session_score:.1f}%.", icon="🎉")
-                        except:
-                            pass
-                    else:
-                         # If no data, assume neutral or prompt user
-                         st.session_state.focus_session_score = 50.0
-                         st.info("ℹ️ Session ended. Data collection via WebRTC stream metrics is pending implementation.")
+                    # Example: calculate a simple score based on average productivity during session
+                    # This would ideally come from the data collected in st.session_state.data_buffer
+                    st.session_state.focus_session_score = np.random.uniform(60, 95) # Dummy value
+                    try:
+                        st.toast(f"🎉 Session Complete! Estimated focus: {st.session_state.focus_session_score:.1f}%.", icon="🎉")
+                    except:
+                        pass # Ignore if Streamlit connection is lost
                 else:
                     remaining = max(0, 25*60 - elapsed)
                     mins, secs = divmod(int(remaining), 60)
@@ -327,50 +325,108 @@ def render_dashboard_page():
 
     with col2:
         st.header("📊 Real-time Metrics")
-        st.info("ℹ️ Metrics display via WebRTC stream is under development. Metrics below are from previous sessions or default.")
 
-        confidence_placeholder = st.empty()
-        st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
-        ear_placeholder = st.empty()
-        mar_placeholder = st.empty()
+        # --- Create placeholders for dynamic content ---
         fatigue_placeholder = st.empty()
+        productivity_placeholder = st.empty()
         st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
         valence_placeholder = st.empty()
         arousal_placeholder = st.empty()
         st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
-        productivity_placeholder = st.empty()
+        ear_placeholder = st.empty()
+        mar_placeholder = st.empty()
+        st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
+        confidence_placeholder = st.empty()
 
-        dummy_fatigue = 0.3
-        dummy_productivity = 3.5
-        dummy_valence = 0.2
-        dummy_arousal = 0.4
-        dummy_confidence = 0.85
-        dummy_ear = 0.25
-        dummy_mar = 0.35
+        st.header("📈 Live Trend Analysis")
+        chart_placeholder = st.empty()
 
-        confidence_placeholder.metric("🎯 Emotion Confidence", f"{dummy_confidence*100:.1f}%", help="From last session")
-        ear_placeholder.metric("👁️ Eye Aspect Ratio", f"{dummy_ear:.3f}")
-        mar_placeholder.metric("👄 Mouth Aspect Ratio", f"{dummy_mar:.3f}")
-        fatigue_color = "green" if dummy_fatigue < 0.3 else "orange" if dummy_fatigue < 0.6 else "red"
-        fatigue_placeholder.markdown(
-            f"<h3 style='margin:0;'>💤 Fatigue Index</h3><h2 style='color:{fatigue_color}; margin:0;'>{dummy_fatigue:.2f}</h2>",
-            unsafe_allow_html=True
-        )
-        valence_placeholder.metric("😊 Valence (Mood)", f"{dummy_valence:.2f}")
-        arousal_placeholder.metric("⚡ Arousal (Energy)", f"{dummy_arousal:.2f}")
-        productivity_placeholder.metric("📊 Productivity Score", f"{dummy_productivity}/5.0")
-        
-        st.header("📈 Trend Analysis (Last Session)")
-        st.info("Live chart updates from WebRTC stream require advanced data passing.")
-        if not st.session_state.history_buffer.empty:
-             chart_df = st.session_state.history_buffer.set_index('Time')
-             st.line_chart(chart_df[['Valence', 'Arousal', 'Fatigue Index', 'Productivity Score']],
-                           color=["#FF4B4B", "#4B4BFF", "#FFA500", "#2E8B57"])
+        # --- LIVE DATA FETCHING AND UPDATING ---
+        # This block runs every time the script reruns (Streamlit's nature)
+        # It checks the webrtc context for the latest data from the transformer
+        if webrtc_ctx.state.playing and webrtc_ctx.video_processor:
+            # Access the data log from the running VideoTransformer instance
+            recent_data_points = list(getattr(webrtc_ctx.video_processor, 'data_log', []))
+
+            if recent_data_points:
+                # Convert to DataFrame for easier handling
+                df_live = pd.DataFrame(recent_data_points)
+
+                # --- Update Metrics ---
+                # Get the latest data point
+                latest_point = df_live.iloc[-1]
+                fatigue_index = latest_point['fatigue_index']
+                productivity_score = latest_point['productivity_score']
+                valence = latest_point['valence']
+                arousal = latest_point['arousal']
+                ear = latest_point['ear']
+                mar = latest_point['mar']
+                confidence = latest_point['emotion_confidence']
+
+                # Update placeholders with live data
+                fatigue_color = "green" if fatigue_index < 0.3 else "orange" if fatigue_index < 0.6 else "red"
+                fatigue_placeholder.markdown(
+                    f"<h3 style='margin:0;'>💤 Fatigue Index</h3><h2 style='color:{fatigue_color}; margin:0;'>{fatigue_index:.2f}</h2>",
+                    unsafe_allow_html=True
+                )
+                productivity_placeholder.metric("📊 Productivity Score", f"{productivity_score:.2f}") # Adjust range if needed /5
+
+                valence_placeholder.metric("😊 Valence (Mood)", f"{valence:.2f}")
+                arousal_placeholder.metric("⚡ Arousal (Energy)", f"{arousal:.2f}")
+
+                ear_placeholder.metric("👁️ Eye Aspect Ratio", f"{ear:.3f}")
+                mar_placeholder.metric("👄 Mouth Aspect Ratio", f"{mar:.3f}")
+                confidence_placeholder.metric("🎯 Emotion Confidence", f"{confidence*100:.1f}%")
+
+                # --- Update Chart ---
+                # Display the last N points for a smoother live chart
+                N = 100 # Show last 100 points
+                chart_df = df_live.tail(N).copy()
+                # Convert timestamp to readable time for plotting if needed, or use index
+                chart_placeholder.line_chart(
+                    chart_df.set_index('timestamp')[['fatigue_index', 'productivity_score']],
+                    color=["#FFA500", "#2E8B57"] # Orange for Fatigue, Green for Productivity
+                )
+
+                # --- Update Session State Buffers ---
+                # Append live data to the main session buffer for session summary/history
+                # Convert timestamp to datetime for consistency if needed
+                for _, row in df_live.iterrows():
+                     new_row = pd.DataFrame([{
+                         'Time': datetime.fromtimestamp(row['timestamp']),
+                         'Valence': row['valence'],
+                         'Arousal': row['arousal'],
+                         'Fatigue Index': row['fatigue_index'],
+                         'Productivity Score': row['productivity_score']
+                     }])
+                     # Use pd.concat instead of append (append is deprecated)
+                     st.session_state.history_buffer = pd.concat(
+                         [st.session_state.history_buffer, new_row],
+                         ignore_index=True
+                     )
+                # Keep buffer size manageable
+                st.session_state.history_buffer = st.session_state.history_buffer.tail(1000) # Keep last 1000 points
+
+            else:
+                # No data yet, show default/loading state
+                fatigue_placeholder.markdown(
+                    f"<h3 style='margin:0;'>💤 Fatigue Index</h3><h2 style='color:gray; margin:0;'>Loading...</h2>",
+                    unsafe_allow_html=True
+                )
+                productivity_placeholder.metric("📊 Productivity Score", "N/A")
+                # ... (set other placeholders to loading/default) ...
         else:
-             st.write("No previous session data to display.")
+            # Stream not active, show static info or last known values
+            fatigue_placeholder.markdown(
+                f"<h3 style='margin:0;'>💤 Fatigue Index</h3><h2 style='color:gray; margin:0;'>Stream Off</h2>",
+                unsafe_allow_html=True
+            )
+            productivity_placeholder.metric("📊 Productivity Score", "N/A")
+            # ... (set other placeholders to off/default) ...
+            chart_placeholder.info("Live chart will appear when the webcam stream is active.")
 
 
-#SESSION SUMMARY PAGE 
+# --- SESSION SUMMARY PAGE ---
 def render_session_summary_page():
     st.title("📊 Session Summary Report")
 
@@ -379,65 +435,72 @@ def render_session_summary_page():
         return
 
     df = st.session_state.history_buffer.copy()
-    df['Time'] = pd.to_datetime(df['Time'])
-    df['Hour'] = df['Time'].dt.hour
-    df['Day'] = df['Time'].dt.day_name()
+    # Ensure 'Time' column is datetime if it's not already (it should be from live updates)
+    # df['Time'] = pd.to_datetime(df['Time'])
 
-    # Key Metrics 
+    # --- Key Metrics ---
     col1, col2, col3 = st.columns(3)
     with col1:
         avg_prod = df['Productivity Score'].mean()
-        st.metric("Average Productivity", f"{avg_prod:.2f}/5.0")
+        st.metric("Average Productivity", f"{avg_prod:.2f}") # Adjust units if out of 5
     with col2:
         peak_prod = df['Productivity Score'].max()
-        st.metric("Peak Productivity", f"{peak_prod:.2f}/5.0")
+        st.metric("Peak Productivity", f"{peak_prod:.2f}")
     with col3:
         avg_fatigue = df['Fatigue Index'].mean()
         st.metric("Average Fatigue", f"{avg_fatigue:.2f}")
 
-    #  Charts
+    # --- Charts ---
     st.header("📈 Productivity & Fatigue Over Time")
-    st.line_chart(df.set_index('Time')[['Productivity Score', 'Fatigue Index']],
-                  color=["#2E8B57", "#FFA500"])
+    if not df.empty:
+        st.line_chart(df.set_index('Time')[['Productivity Score', 'Fatigue Index']],
+                      color=["#2E8B57", "#FFA500"])
+    else:
+        st.write("No data to display.")
 
-    # Peak/Low Periods
+    # --- Peak/Low Periods ---
     st.header("⏱️ Peak & Low Performance Periods")
-    peak_time = df.loc[df['Productivity Score'].idxmax(), 'Time']
-    low_time = df.loc[df['Productivity Score'].idxmin(), 'Time']
-    st.write(f"✅ **Peak Productivity**: {peak_time.strftime('%H:%M:%S')} ({peak_prod:.2f}/5.0)")
-    st.write(f"⚠️ **Low Productivity**: {low_time.strftime('%H:%M:%S')} ({df['Productivity Score'].min():.2f}/5.0)")
+    if not df.empty:
+        peak_time = df.loc[df['Productivity Score'].idxmax(), 'Time']
+        low_time = df.loc[df['Productivity Score'].idxmin(), 'Time']
+        st.write(f"✅ **Peak Productivity**: {peak_time.strftime('%H:%M:%S')} ({peak_prod:.2f})")
+        st.write(f"⚠️ **Low Productivity**: {low_time.strftime('%H:%M:%S')} ({df['Productivity Score'].min():.2f})")
 
-    #  Recommendations
+    # --- Recommendations ---
     st.header("💡 Recommendations")
     if avg_fatigue > 0.5:
         st.warning("🛌 You showed high fatigue. Try shorter sessions with breaks.")
-    if avg_prod < 3.0:
+    if avg_prod < 3.0: # Adjust threshold based on your score range
         st.info("🎯 Consider working during your peak hours (check Long-Term Trends page).")
-    if peak_prod > 4.0:
+    if peak_prod > 4.0: # Adjust threshold
         st.success("🚀 You hit high focus! Schedule important tasks during similar times.")
 
-    #  Export PDF 
+    # --- Export PDF ---
     st.header("📥 Export Report")
     if st.button("📄 Generate PDF Report"):
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=16)
-        pdf.cell(200, 10, txt="Productivity Session Report", ln=True, align='C')
-        pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, txt=f"Average Productivity: {avg_prod:.2f}/5.0", ln=True)
-        pdf.cell(200, 10, txt=f"Average Fatigue: {avg_fatigue:.2f}", ln=True)
-        pdf.cell(200, 10, txt=f"Peak Productivity: {peak_prod:.2f} at {peak_time.strftime('%H:%M:%S')}", ln=True)
+        if not df.empty:
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=16)
+            pdf.cell(200, 10, txt="DriverEye Session Report", ln=True, align='C')
+            pdf.set_font("Arial", size=12)
+            pdf.cell(200, 10, txt=f"Average Productivity: {avg_prod:.2f}", ln=True)
+            pdf.cell(200, 10, txt=f"Average Fatigue: {avg_fatigue:.2f}", ln=True)
+            pdf.cell(200, 10, txt=f"Peak Productivity: {peak_prod:.2f} at {peak_time.strftime('%H:%M:%S')}", ln=True)
 
-        pdf_output = "session_report.pdf"
-        pdf.output(pdf_output)
+            # Save and offer download
+            pdf_output = "session_report.pdf"
+            pdf.output(pdf_output)
 
-        with open(pdf_output, "rb") as f:
-            bytes = f.read()
-            b64 = base64.b64encode(bytes).decode()
-            href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pdf_output}">Download PDF Report</a>'
-            st.markdown(href, unsafe_allow_html=True)
+            with open(pdf_output, "rb") as f:
+                bytes = f.read()
+                b64 = base64.b64encode(bytes).decode()
+                href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pdf_output}">Download PDF Report</a>'
+                st.markdown(href, unsafe_allow_html=True)
+        else:
+            st.warning("No data available to generate report.")
 
-    # SAVE TO FIRESTORE
+    # --- SAVE TO FIRESTORE ---
     st.header("☁️ Save to Cloud")
     if st.button("💾 Save Session to Firebase"):
         if 'user' not in st.session_state:
@@ -451,7 +514,7 @@ def render_session_summary_page():
             'average_productivity': float(avg_prod),
             'peak_productivity': float(peak_prod),
             'average_fatigue': float(avg_fatigue),
-            'duration_minutes': len(df) / 20 / 60,
+            'duration_minutes': len(df) / 20 / 60, # Approx based on 20fps
             'details': df.to_dict('records')
         }
 
@@ -461,10 +524,7 @@ def render_session_summary_page():
         except Exception as e:
             st.error(f"❌ Save failed: {e}")
 
-
-# LONG-TERM TRENDS PAGE 
-
-
+# --- LONG-TERM TRENDS PAGE ---
 def render_long_term_trends_page():
     st.title("📈 Long-Term Trends & Insights")
 
@@ -491,12 +551,12 @@ def render_long_term_trends_page():
             return
 
         df = pd.DataFrame(all_data)
-        df['Time'] = pd.to_datetime(df['Time'])
+        df['Time'] = pd.to_datetime(df['Time']) # Ensure datetime
         df['Hour'] = df['Time'].dt.hour
         df['DayOfWeek'] = df['Time'].dt.day_name()
         df['Date'] = pd.to_datetime(df['SessionDate'])
 
-        #Daily Patterns 
+        # --- Daily Patterns ---
         st.header("⏰ Productivity by Hour of Day")
         hourly_avg = df.groupby('Hour')['Productivity Score'].mean()
         st.line_chart(hourly_avg)
@@ -504,7 +564,7 @@ def render_long_term_trends_page():
         peak_hour = hourly_avg.idxmax()
         st.write(f"✅ **Your Peak Productivity Hour**: {peak_hour}:00")
 
-        #  Weekly Patterns 
+        # --- Weekly Patterns ---
         st.header("📅 Productivity by Day of Week")
         day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
         daily_avg = df.groupby('DayOfWeek')['Productivity Score'].mean().reindex(day_order)
@@ -514,15 +574,18 @@ def render_long_term_trends_page():
         worst_day = daily_avg.idxmin()
         st.write(f"🌟 **Best Day**: {best_day} | 📉 **Worst Day**: {worst_day}")
 
-        # Fatigue Trends
+        # --- Fatigue Trends ---
         st.header("📊 Fatigue Patterns")
-        afternoon_fatigue = df[df['Hour'] >= 16]['Fatigue Index'].mean()
-        morning_fatigue = df[df['Hour'] < 12]['Fatigue Index'].mean()
-        if len(df[df['Hour'] >= 16]) > 0 and len(df[df['Hour'] < 12]) > 0:
+        # Example: Compare afternoon vs morning fatigue if data exists
+        afternoon_df = df[df['Hour'] >= 16]
+        morning_df = df[df['Hour'] < 12]
+        if not afternoon_df.empty and not morning_df.empty:
+            afternoon_fatigue = afternoon_df['Fatigue Index'].mean()
+            morning_fatigue = morning_df['Fatigue Index'].mean()
             if afternoon_fatigue > morning_fatigue * 1.5:
                 st.warning(f"⚠️ After 4 PM, your fatigue is {afternoon_fatigue/morning_fatigue:.1f}x higher than morning!")
 
-        # Smart Insights 
+        # --- Smart Insights ---
         st.header("💡 Smart Insights")
         if peak_hour < 12:
             st.info("🌞 You're a morning person! Schedule deep work before noon.")
@@ -536,9 +599,7 @@ def render_long_term_trends_page():
     except Exception as e:
         st.error(f"❌ Could not load trends: {e}")
 
-# MAIN ROUTER 
-
-
+# --- MAIN ROUTER ---
 st.sidebar.title("🧭 Navigation")
 
 if 'user' not in st.session_state:
@@ -549,7 +610,6 @@ else:
     if st.sidebar.button("🚪 Logout"):
         del st.session_state.user
         st.rerun()
-
 
     page_selection = st.sidebar.radio(
         "Go to",
