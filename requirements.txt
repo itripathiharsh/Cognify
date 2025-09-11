@@ -2,7 +2,7 @@ torch==2.8.0
 torchvision==0.23.0
 torchaudio==2.8.0
 numpy==1.26.4
-scipy==1.12.0     # ✅ downgrade for prebuilt wheel
+scipy==1.12.0
 pandas==2.2.2
 scikit-learn==1.5.1
 opencv-python-headless==4.10.0.84
