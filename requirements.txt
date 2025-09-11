@@ -12,4 +12,4 @@ firebase-admin==6.5.0
 fpdf==1.7.2
 protobuf==4.25.3
 streamlit-webrtc==0.47.1
-av==10.0.0
+av>=10.0.0
