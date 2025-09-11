@@ -1,0 +1,12 @@
+# render.yaml
+services:
+  - type: web
+    name: cognify-dashboard # Or your preferred app name
+    env: python
+    buildCommand: "pip install -r requirements.txt" # Ensure this installs everything including streamlit-webrtc
+    startCommand: "streamlit run src/app/app.py" # Path to your main Streamlit app file
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12 # Match your runtime.txt
+      # IMPORTANT: Add other environment variables Render needs here if any (besides secrets)
+    # Secret files or env vars are added via the Render dashboard, not this file.
