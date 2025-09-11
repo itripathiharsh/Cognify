@@ -35,6 +35,20 @@ import uuid
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 
+import asyncio
+import logging
+
+# Suppress noisy aioice errors after event loop closes
+def ignore_aioice_errors(loop, context):
+    msg = context.get("message", "")
+    if "call_exception_handler" in msg or "sendto" in msg:
+        logging.warning(f"Ignored aioice error: {msg}")
+        return
+    loop.default_exception_handler(context)
+
+asyncio.get_event_loop().set_exception_handler(ignore_aioice_errors)
+
+
 # --- Add project root to PYTHONPATH ---
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_root not in sys.path:
