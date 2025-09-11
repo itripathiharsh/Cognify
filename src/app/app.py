@@ -29,6 +29,7 @@ import json
 import atexit
 import asyncio
 import logging
+import uuid
 
 # --- Firebase Imports ---
 import firebase_admin
@@ -218,8 +219,8 @@ class FatigueVideoTransformer(VideoTransformerBase):
                 'timestamp': float(time.time()),
                 'fatigue_index': float(fatigue_index),
                 'productivity_score': float(display_productivity),
-                'ear': float(fatigue_data.get('ear', 0.0)),
-                'mar': float(fatigue_data.get('mar', 0.0)),
+                'ear': float(fatigue_data.get('ear', 0.0)) if fatigue_data.get('ear', None) is not None else 0.0,
+                'mar': float(fatigue_data.get('mar', 0.0)) if fatigue_data.get('mar', None) is not None else 0.0,
                 'valence': float(0.5 - fatigue_index),   # placeholder
                 'arousal': float(0.5 + fatigue_index),   # placeholder
                 'emotion_confidence': float(fatigue_data.get('emotion_confidence', 0.8))
@@ -301,7 +302,7 @@ def engineer_realtime_features(data_buffer: deque, feature_names: list):
     return feature_df[feature_names]
 
 # -----------------------------
-# Login page (kept from original)
+# Login page (kept from original) but made robust to Admin SDK limitations
 # -----------------------------
 def render_login_page():
     st.title("🔐 Login to DriverEye Dashboard")
@@ -312,17 +313,38 @@ def render_login_page():
         email = st.text_input("Email", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
         if st.button("Login", type="primary"):
+            # Admin SDK cannot verify client passwords — attempt lookup and fallback to local session user
             try:
-                user = auth.get_user_by_email(email)
-                st.session_state.user = {
-                    'uid': user.uid,
-                    'email': user.email,
-                    'display_name': user.display_name or email.split('@')[0]
-                }
-                st.success(f"🎉 Welcome back, {st.session_state.user['display_name']}!")
-                st.experimental_rerun()
+                if st.session_state.db:
+                    # If Firebase admin exists, try to fetch user by email (no password check)
+                    user = auth.get_user_by_email(email)
+                    st.session_state.user = {
+                        'uid': user.uid,
+                        'email': user.email,
+                        'display_name': user.display_name or email.split('@')[0]
+                    }
+                    st.success(f"🎉 Welcome back, {st.session_state.user['display_name']}! (Firebase user found)")
+                    st.experimental_rerun()
+                else:
+                    # No Firebase; create a local guest-style user
+                    local_uid = "local_" + uuid.uuid4().hex[:8]
+                    st.session_state.user = {
+                        'uid': local_uid,
+                        'email': email or f"guest_{local_uid}@local",
+                        'display_name': email.split('@')[0] if email else f"Guest_{local_uid}"
+                    }
+                    st.success(f"🎉 Signed in locally as {st.session_state.user['display_name']}.")
+                    st.experimental_rerun()
             except Exception as e:
-                st.error("❌ Login failed. (Admin SDK doesn't sign in like client SDK.)")
+                # Fallback: create local user session anyway (inform the user)
+                local_uid = "local_" + uuid.uuid4().hex[:8]
+                st.session_state.user = {
+                    'uid': local_uid,
+                    'email': email or f"guest_{local_uid}@local",
+                    'display_name': email.split('@')[0] if email else f"Guest_{local_uid}"
+                }
+                st.warning("Logged in locally (Firebase lookup failed or password-based login not supported).")
+                st.experimental_rerun()
 
     with tab2:
         email = st.text_input("Email", key="signup_email")
@@ -330,16 +352,36 @@ def render_login_page():
         name = st.text_input("Display Name", key="signup_name")
         if st.button("Sign Up", type="primary"):
             try:
-                user = auth.create_user(email=email, password=password, display_name=name)
-                st.session_state.user = {
-                    'uid': user.uid,
-                    'email': user.email,
-                    'display_name': name or email.split('@')[0]
-                }
-                st.success("✅ Account created! Welcome!")
-                st.experimental_rerun()
+                if st.session_state.db:
+                    # Try to create a Firebase user (may fail depending on permissions)
+                    user = auth.create_user(email=email, password=password, display_name=name)
+                    st.session_state.user = {
+                        'uid': user.uid,
+                        'email': user.email,
+                        'display_name': name or email.split('@')[0]
+                    }
+                    st.success("✅ Account created! Welcome!")
+                    st.experimental_rerun()
+                else:
+                    # Create local user
+                    local_uid = "local_" + uuid.uuid4().hex[:8]
+                    st.session_state.user = {
+                        'uid': local_uid,
+                        'email': email or f"guest_{local_uid}@local",
+                        'display_name': name or (email.split('@')[0] if email else f"Guest_{local_uid}")
+                    }
+                    st.success("✅ Local account created (no Firebase).")
+                    st.experimental_rerun()
             except Exception as e:
-                st.error(f"❌ Signup failed: {str(e)}")
+                # Fallback local creation
+                local_uid = "local_" + uuid.uuid4().hex[:8]
+                st.session_state.user = {
+                    'uid': local_uid,
+                    'email': email or f"guest_{local_uid}@local",
+                    'display_name': name or (email.split('@')[0] if email else f"Guest_{local_uid}")
+                }
+                st.warning(f"Created local account (Firebase create failed): {e}")
+                st.experimental_rerun()
 
 # -----------------------------
 # Dashboard page (kept original logic, added safe guards)
@@ -365,7 +407,7 @@ def render_dashboard_page():
         _GLOBAL_WEBRTC_CTX["ctx"] = webrtc_ctx
 
         # Show status
-        if webrtc_ctx and webrtc_ctx.state.playing:
+        if webrtc_ctx and getattr(webrtc_ctx, "state", None) and webrtc_ctx.state.playing:
             st.success("✅ Webcam stream is active.")
             # Stop button to terminate gracefully
             if st.button("🛑 Stop Camera", key="stop_camera"):
@@ -423,6 +465,14 @@ def render_dashboard_page():
             recent_data_points = list(getattr(video_processor, 'data_log', []))
             if recent_data_points:
                 df_live = pd.DataFrame(recent_data_points)
+
+                # Convert timestamp column to datetime index for plotting
+                try:
+                    df_live['ts_dt'] = pd.to_datetime(df_live['timestamp'], unit='s')
+                    df_live = df_live.sort_values('timestamp')
+                except Exception:
+                    df_live['ts_dt'] = pd.to_datetime(df_live['timestamp'], unit='s', errors='coerce')
+
                 latest_point = df_live.iloc[-1]
 
                 fatigue_index = float(latest_point.get('fatigue_index', 0.0))
@@ -447,23 +497,42 @@ def render_dashboard_page():
 
                 # Chart
                 try:
-                    chart_df = df_live.tail(100).set_index('timestamp')
+                    chart_df = df_live.set_index('ts_dt').tail(100)
                     chart_placeholder.line_chart(chart_df[['fatigue_index', 'productivity_score']], color=["#FFA500", "#2E8B57"])
                 except Exception:
-                    chart_placeholder.line_chart(df_live[['fatigue_index', 'productivity_score']].tail(50))
+                    try:
+                        chart_placeholder.line_chart(df_live[['fatigue_index', 'productivity_score']].tail(50))
+                    except Exception:
+                        chart_placeholder.info("Unable to draw live chart.")
 
                 # Append to history buffer safely
+                appended_rows = []
                 for _, row in df_live.iterrows():
-                    new_row = pd.DataFrame([{
-                        'Time': datetime.fromtimestamp(row['timestamp']),
-                        'Valence': row.get('valence', 0.0),
-                        'Arousal': row.get('arousal', 0.0),
-                        'Fatigue Index': row.get('fatigue_index', 0.0),
-                        'Productivity Score': row.get('productivity_score', 0.0)
-                    }])
-                    st.session_state.history_buffer = pd.concat([st.session_state.history_buffer, new_row], ignore_index=True)
-                # Keep manageable size
-                st.session_state.history_buffer = st.session_state.history_buffer.tail(1000)
+                    try:
+                        t = datetime.fromtimestamp(float(row['timestamp']))
+                    except Exception:
+                        t = pd.to_datetime(row.get('ts_dt', datetime.utcnow()))
+                    new_row = {
+                        'Time': t,
+                        'Valence': float(row.get('valence', 0.0)),
+                        'Arousal': float(row.get('arousal', 0.0)),
+                        'Fatigue Index': float(row.get('fatigue_index', 0.0)),
+                        'Productivity Score': float(row.get('productivity_score', 0.0))
+                    }
+                    appended_rows.append(new_row)
+
+                if appended_rows:
+                    append_df = pd.DataFrame(appended_rows)
+                    # Concat and deduplicate by Time (keeps last occurrence)
+                    combined = pd.concat([st.session_state.history_buffer, append_df], ignore_index=True)
+                    # Normalize Time column to datetime type and drop duplicates
+                    try:
+                        combined['Time'] = pd.to_datetime(combined['Time'])
+                    except Exception:
+                        pass
+                    combined = combined.drop_duplicates(subset=['Time'], keep='last').reset_index(drop=True)
+                    # Keep only last 1000 rows to limit size
+                    st.session_state.history_buffer = combined.tail(1000).reset_index(drop=True)
             else:
                 fatigue_placeholder.markdown("<h3 style='margin:0;'>💤 Fatigue Index</h3><h2 style='color:gray; margin:0;'>Waiting for data...</h2>", unsafe_allow_html=True)
                 productivity_placeholder.metric("📊 Productivity Score", "N/A")
