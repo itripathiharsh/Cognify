@@ -10,7 +10,7 @@ opencv-python-headless==4.10.0.84
 mediapipe==0.10.14
 streamlit==1.38.0
 firebase-admin==6.5.0
-fpdf==1.7.2
+fpdf2==2.7.9
 protobuf==4.25.3
 streamlit-webrtc==0.47.1
 av==10.0.0
